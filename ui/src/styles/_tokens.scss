@@ -1,0 +1,41 @@
+$gutter: 20px;
+$chamfer: 7px;
+$transition: 140ms ease;
+
+// Windows ships Bahnschrift (DIN 1451, the lettering of signs and cockpit placards) on every PC running the
+// camera: it gives the interface its technical voice without bundling a font.
+$font-display: "Bahnschrift", "DIN Alternate", "Segoe UI Variable Display", "Segoe UI", sans-serif;
+$font-text: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+$font-mono: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+
+// Corners cut at 45 degrees on the top-right and bottom-left, like the angled strokes of the AzurPoly logo.
+@mixin chamfer($size: $chamfer) {
+  clip-path: polygon(0 0, calc(100% - #{$size}) 0, 100% #{$size}, 100% 100%, #{$size} 100%, 0 calc(100% - #{$size}));
+}
+
+// Chamfered frame: the element paints the border colour and ::before paints the fill one pixel inside, so the
+// outline follows the cut corners. Colours come from --frame-border and --frame-fill.
+@mixin framed($size: $chamfer) {
+  position: relative;
+  isolation: isolate;
+  background: var(--frame-border, var(--line));
+  @include chamfer($size);
+
+  &::before {
+    position: absolute;
+    inset: 1px;
+    z-index: -1;
+    content: "";
+    background: var(--frame-fill, var(--surface));
+    @include chamfer($size - .5px);
+  }
+}
+
+// Small spaced capitals, for labels above or beside a value.
+@mixin eyebrow {
+  font-family: $font-display;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .2em;
+  text-transform: uppercase;
+}

@@ -1,0 +1,22 @@
+# Local toolchains, builds, captures, receipts and historical binary archives.
+build/
+out/
+obj/
+target/
+__pycache__/
+*.pyc
+*.pdb
+*.obj
+*.exe
+*.dll
+*.addon64
+*.dmp
+*.log
+*.partial
+.env
+.env.*
+/ui/node_modules/
+/ui/dist/
+/ui/src/generated/
+.vs/
+.vscode/

@@ -1,0 +1,20 @@
+{
+  "llvm-mingw": {
+    "version": "20260908 / LLVM 23.1.1",
+    "url": "https://github.com/mstorsjo/llvm-mingw/releases/download/20260908/llvm-mingw-20260908-ucrt-x86_64.zip",
+    "sha256": "1bcf74d06b724aeecaa6412ca85f5b26fb1da770e7cdcefa9263c9c5c3ad34b6",
+    "directory": "llvm-mingw/llvm-mingw-20260908-ucrt-x86_64"
+  },
+  "webview2-sdk": {
+    "version": "1.0.4078.44",
+    "url": "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.4078.44",
+    "sha256": "dc4d1d9168df26b830398303e50210b6e1729f6ce5a7ac69d2c766852f489962",
+    "directory": "webview2-1.0.4078.44"
+  },
+  "nlohmann-json": {
+    "version": "3.12.0",
+    "url": "https://github.com/nlohmann/json/releases/download/v3.12.0/json.hpp",
+    "sha256": "aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63",
+    "directory": "nlohmann-json-3.12.0"
+  }
+}

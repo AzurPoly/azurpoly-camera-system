@@ -1,0 +1,237 @@
+/*
+ * Declares bounded native readers, scoped memory-query validation and manager/aircraft inspectors. A
+ * readable pointer is only a temporary observation; range, generation, ownership and end-of-inspection
+ * checks remain separate requirements.
+ */
+
+#pragma once
+#include <windows.h>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include "../camera/aircraft_inventory.hpp"
+#include "camera_layout.hpp"
+#include "image_inventory.hpp"
+
+namespace azp::engine_camera {
+
+class MemoryReader {
+ public:
+  virtual ~MemoryReader() = default;
+  /*
+   * Copy exactly the requested field or return false; implementations must not throw. The native adapter
+   * owns page permissions, access/lifetime checks and any shared read allowance. Production cores use
+   * -fno-exceptions.
+   */
+  virtual bool read(std::uint64_t address, void* destination, std::size_t size) = 0;
+};
+
+}  /* namespace azp::engine_camera */
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
+namespace azp::native_camera {
+
+inline constexpr std::uint32_t kLocalObjectReadLimit = 131072;
+inline constexpr std::uint32_t kLocalObjectFieldLimit = 32768;
+
+/*
+ * First failure only, captured from existing queries without any extra reads or allocation. Values describe
+ * one differing metadata field, never object data.
+ */
+struct LocalMemoryQueryFailure {
+  const char* stage = "none";
+  const char* field = "none";
+  std::uintptr_t address = 0;
+  std::size_t region_index = 0;
+  std::uint64_t expected = 0, observed = 0;
+  DWORD system_error = 0;
+};
+
+std::string describe_local_memory_query_failure(const LocalMemoryQueryFailure& failure);
+
+enum class LocalMemoryQueryMode { full_regions, private_pages };
+enum class LocalImageQueryMode { full_regions, pages };
+
+/*
+ * Fresh, current-process AA flag helpers. The span is bounded to 16 bytes in one committed private
+ * allocation, with exactly PAGE_READWRITE throughout. No proof is retained across writes/native calls. The
+ * read copies both words only after an exact RPM; its caller must establish ownership and writability.
+ */
+bool writable_private_span(std::uint64_t address, std::size_t size) noexcept;
+bool read_local_flag_words(std::uint64_t address, std::array<std::uint64_t, 2>& flags) noexcept;
+
+/*
+ * One read-only inspection stage only; no private calls may run inside it. The full_regions mode caches
+ * region metadata, never contents. An earlier-page metadata probe is accepted only if it covers the
+ * requested address; otherwise query that exact address. This backend uses at most two initial queries plus
+ * one endpoint query per saved region (192 calls); no metadata merging. The alignment bounds the prefix, not
+ * VirtualQueryEx's internal suffix scan. Exact RPM reads and the caller's complete trace rereads still run.
+ * finish() checks every saved allocation, extent, state, type and protection against fresh region metadata.
+ * A fresh wider query can prove overlapping suffixes within that endpoint only; uncovered regions get
+ * independent queries and conflicting observations fail. Results must remain local until finish() succeeds.
+ * A failure poisons the scope; there is no eviction or retry, and destruction discards all cached metadata.
+ * This is not an atomic lifetime proof: an allocation/protection ABA between checks remains possible. RPM
+ * enforces access if protection changes midstage.
+ */
+class ScopedLocalMemoryQueryCache {
+ public:
+  static constexpr std::size_t kRegionLimit = 64;
+  static constexpr std::size_t kPageLimit = 128;
+  static constexpr std::size_t kAllocationLimit = 64;
+  /*
+   * private_pages keeps fresh allocation identity/extent and the protection of every requested private page,
+   * rather than the unrelated homogeneous suffix. Cold/unavailable pages and capacity overflow use the
+   * full-region backend. Explicit image-page readers share these bounded proofs with distinct image
+   * allocation identity. Direct MBI/default image queries stay exact.
+   */
+  explicit ScopedLocalMemoryQueryCache(LocalMemoryQueryMode mode = LocalMemoryQueryMode::full_regions) noexcept;
+  ~ScopedLocalMemoryQueryCache();
+  ScopedLocalMemoryQueryCache(const ScopedLocalMemoryQueryCache&) = delete;
+  ScopedLocalMemoryQueryCache& operator=(const ScopedLocalMemoryQueryCache&) = delete;
+  bool finish() noexcept;
+  /*
+   * A borrowed pure substage may join only the currently active transaction.
+   */
+  bool is_current() const noexcept;
+  /*
+   * Reader implementation only. A failed RPM also poisons this stage.
+   */
+  SIZE_T query(const void* address, MEMORY_BASIC_INFORMATION& region) noexcept;
+  bool uses_private_pages() const noexcept { return mode_ == LocalMemoryQueryMode::private_pages; }
+  bool validate_private_range(std::uintptr_t address, std::size_t size) noexcept;
+  bool validate_image_range(std::uintptr_t address, std::size_t size, std::uintptr_t module) noexcept;
+  void fail(const void* address, SIZE_T requested, SIZE_T copied, DWORD error) noexcept;
+  const LocalMemoryQueryFailure& failure() const noexcept { return failure_; }
+
+ private:
+  struct AllocationProof {
+    std::uintptr_t base = 0;
+    std::size_t size = 0;
+    DWORD protection = 0;
+    DWORD type = MEM_PRIVATE;
+  };
+  struct PageProof {
+    std::uintptr_t base = 0;
+    DWORD protection = 0;
+    std::size_t allocation = 0;
+  };
+  bool finish_pages() noexcept;
+  bool validate_page_range(std::uintptr_t address, std::size_t size, DWORD type, std::uintptr_t allocation) noexcept;
+  bool refuse(const char* stage,
+              const char* field,
+              std::uintptr_t address,
+              std::size_t index,
+              std::uint64_t expected,
+              std::uint64_t observed,
+              DWORD error = ERROR_SUCCESS) noexcept;
+  ScopedLocalMemoryQueryCache* previous_ = nullptr;
+  LocalMemoryQueryMode mode_;
+  std::array<AllocationProof, kAllocationLimit> allocations_{};
+  std::array<PageProof, kPageLimit> pages_{};
+  std::size_t allocation_count_ = 0;
+  std::size_t page_count_ = 0;
+  std::array<MEMORY_BASIC_INFORMATION, kRegionLimit> regions_{};
+  std::size_t count_ = 0;
+  LocalMemoryQueryFailure failure_{};
+  bool failed_ = false;
+  bool active_ = true;
+};
+
+/*
+ * Current process only; no handles/PIDs to other processes are accepted. Every 1..32768-byte request must
+ * fit committed readable MEM_PRIVATE regions. Page queries never consume guard pages or change protection.
+ * An optional stage cache requires successful endpoint validation before consuming read results. Failed
+ * query/RPM attempts consume their requested bytes; invalid requests/budget refusals do not issue a
+ * query/read. Output is copied only after an exact successful RPM.
+ */
+class LocalMemoryReader final : public engine_camera::MemoryReader, public discovery::AircraftObjectReader {
+ public:
+  explicit LocalMemoryReader(std::uint32_t limit = kLocalObjectReadLimit) noexcept;
+  bool read(std::uint64_t address, void* destination, std::size_t size) noexcept override;
+  /*
+   * Caller-controlled stage boundary only. Clamp to the fixed upper bound; zero disables reads. Not
+   * thread-safe and never resets itself on failure.
+   */
+  void reset_budget(std::uint32_t limit = kLocalObjectReadLimit) noexcept;
+  std::uint32_t attempted_bytes() const noexcept { return attempted_; }
+  std::uint32_t read_failures() const noexcept { return failures_; }
+  std::uint32_t budget_limit() const noexcept { return limit_; }
+
+ private:
+  std::uint32_t limit_ = 0;
+  std::uint32_t attempted_ = 0;
+  std::uint32_t failures_ = 0;
+};
+
+/*
+ * Explicit main executable only. The supplied size is a read bound, not an identity proof. Default query
+ * clips to that bound and one VirtualQuery region; read can span readable regions but requires exact
+ * MEM_IMAGE allocation identity on every part. Logical PE-section restrictions belong to the caller.
+ * Explicit pages mode clips to requested pages, checking fresh allocation/type and current page access. A
+ * private_pages scope retains those proofs through finish(); outside a scope every query is fresh.
+ * Full-region scopes and startup readers keep the existing query extents and scanner request-count budgets.
+ */
+class LocalImageReader final : public discovery::ImageReader {
+ public:
+  LocalImageReader(HMODULE main_module, std::uint32_t image_size, LocalImageQueryMode mode = LocalImageQueryMode::full_regions) noexcept;
+  discovery::ReadWindow query(std::uint32_t rva, std::uint32_t maximum) noexcept override;
+  bool read(std::uint32_t rva, void* destination, std::size_t size) noexcept override;
+
+ private:
+  HMODULE module_ = nullptr;
+  std::uintptr_t base_ = 0;
+  std::uint32_t limit_ = 0;
+  LocalImageQueryMode mode_ = LocalImageQueryMode::full_regions;
+};
+
+/*
+ * Testable header-only core: at most 8192 requested metadata bytes, all within the first 65536 image bytes.
+ * Validates AMD64 PE32+, at most 96 sections, an image extent of at most 2 GiB, directory bounds and
+ * nonoverlapping sections. Timestamp, checksum, image size and section count are observed metadata, never a
+ * build allowlist. Reads no section body, exports or code. This is structural validation, not process
+ * identity or callable code proof.
+ */
+discovery::Inventory parse_verified_image_headers(discovery::ImageReader& reader);
+
+/*
+ * Supplies GetModuleHandleW(nullptr) to the bounded core. No module enumeration, disk access, process-name
+ * search, private calls, hook install or scans. The native runtime separately owns executable-name and
+ * instruction verification.
+ */
+discovery::Inventory parse_verified_main_image();
+
+}  /* namespace azp::native_camera */
+
+namespace azp::native_camera {
+
+enum class ManagerInspectionStatus { ready, unavailable, identity_refused };
+
+struct ManagerInspection {
+  ManagerInspectionStatus status = ManagerInspectionStatus::unavailable;
+  const char* detail = "Manager inspection has not completed.";
+  std::uint64_t manager = 0, renderer = 0, control = 0, generation = 0;
+  explicit operator bool() const noexcept { return status == ManagerInspectionStatus::ready; }
+  bool temporary() const noexcept { return status == ManagerInspectionStatus::unavailable; }
+};
+
+/*
+ * Pure fixed-field inspection. The adapter must retain its bounded readable image/private-memory checks and
+ * validate region metadata before consuming a successful result. A changing trace is unavailable, never
+ * permission to use either version. Nonzero identity disagreements remain fatal.
+ */
+ManagerInspection inspect_manager_identity(discovery::ImageReader& image,
+                                           engine_camera::MemoryReader& objects,
+                                           std::uint64_t image_base,
+                                           std::uint64_t current_manager,
+                                           std::uint64_t owned_control,
+                                           const CameraImageLayout& layout);
+
+}  /* namespace azp::native_camera */
