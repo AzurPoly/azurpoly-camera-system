@@ -43,7 +43,7 @@ class SceneCaptureManager {
   struct Frame {
     std::uint64_t token = 0;
     SceneCopyMatch match;
-    ID3D12Resource* resource = nullptr;  /* Borrowed owned snapshot, COPY_DEST. */
+    ID3D12Resource* resource = nullptr; /* Borrowed owned snapshot, COPY_DEST. */
     FrameOrder order;
     /*
      * CPU monotonic time immediately before the native producer submission.
@@ -52,17 +52,30 @@ class SceneCaptureManager {
   };
   struct Submission {
     std::uint64_t receipt = 0;
-    ID3D12Fence* fence = nullptr;  /* Process-lifetime borrowed timeline. */
-    std::uint64_t value = 0;       /* Queued only by successful end. */
+    ID3D12Fence* fence = nullptr; /* Process-lifetime borrowed timeline. */
+    std::uint64_t value = 0;      /* Queued only by successful end. */
   };
   /*
    * `captures` counts recorded copies and `source_draws` draws observed on a camera source.
    * `escaped_invalidations` counts unordered submissions whose effect on capture could not be excluded;
    * `tail_status` says why the last queue tail did or did not capture.
    */
+  struct InvalidationStatistics {
+    std::uint64_t global = 0, scoped = 0;
+    std::uint64_t pass_begin = 0, pass_state = 0, barrier_batch = 0, split_barrier = 0, alias_or_discard = 0;
+    std::uint64_t unobserved_work = 0, observer_disabled = 0, reset_failed = 0;
+    std::uint64_t execute_bundle = 0, execute_indirect = 0, predication = 0;
+    std::uint64_t unknown_batches = 0, unknown_lists = 0, invalid_recordings = 0;
+    std::uint64_t discard_calls = 0, source_discards = 0;
+    std::uint64_t legacy_aliases = 0, source_aliases = 0;
+    std::uint64_t legacy_source_splits = 0, enhanced_source_splits = 0, enhanced_source_discards = 0;
+    std::uint64_t legacy_rt = 0, enhanced_rt = 0;
+    bool operator==(const InvalidationStatistics&) const = default;
+  };
   struct Statistics {
     std::uint64_t captures = 0, source_draws = 0;
     std::uint64_t escaped_invalidations = 0;
+    InvalidationStatistics invalidations;
     const char* tail_status = "not_started";
   };
   /*
@@ -117,9 +130,19 @@ class SceneCaptureManager {
   /*
    * Records the actual targets of one native draw, after it was recorded.
    */
-  void observe_source_draw_after(List&, UINT count, ID3D12Resource* const* targets, const std::uint64_t* resource_generations, bool allowed) noexcept;
+  void observe_source_draw_after(List&,
+                                 UINT count,
+                                 ID3D12Resource* const* targets,
+                                 const std::uint64_t* resource_generations,
+                                 bool allowed) noexcept;
   void observe_source_legacy(List&, const D3D12_RESOURCE_BARRIER&) noexcept;
   void observe_source_enhanced(List&, const D3D12_TEXTURE_BARRIER&) noexcept;
+  void observe_source_discard(List&, ID3D12Resource*) noexcept;
+  /*
+   * Records why hook-level uncertainty revoked source evidence. `scoped` means that only positively
+   * identified bound targets were affected; global events invalidate the complete recording.
+   */
+  void note_source_invalidation(std::uint32_t reasons, bool scoped) noexcept;
   void invalidate_source_recording(List&, bool affects_all_sources) noexcept;
   /*
    * Known render-pass/indirect targets affect only their exact resource keys. Missing/truncated target
@@ -209,7 +232,7 @@ class SceneCaptureManager {
     std::uint64_t token = 0, submitted = 0;
     FrameOrder order;
     std::uint64_t capture_time_us = 0;
-    ID3D12CommandQueue* producer = nullptr;  /* Registered queue retained by hook. */
+    ID3D12CommandQueue* producer = nullptr; /* Registered queue retained by hook. */
     unsigned in_flight = 0;
     bool assigned = false, retired = false, quarantined = false, leased = false;
     ID3D12CommandAllocator* tail_allocator = nullptr;
@@ -230,7 +253,7 @@ class SceneCaptureManager {
     std::uint64_t started_us = 0, input_epoch = 0, image_id = 0, capture_time_us = 0;
   };
   struct SourceCandidate {
-    ID3D12Resource* native = nullptr;  /* Registry identity only; never a GPU lease. */
+    ID3D12Resource* native = nullptr; /* Registry identity only; never a GPU lease. */
     std::uint64_t generation = 0;
     D3D12_RESOURCE_DESC description{};
   };
@@ -271,4 +294,4 @@ class SceneCaptureManager {
   Statistics stats_;
 };
 
-}  /* namespace azp */
+} /* namespace azp */

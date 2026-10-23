@@ -120,6 +120,7 @@ void notify_invalidation(List& item, std::uint32_t reasons) noexcept {
     return;
   const OwnedWork owned;
   const bool scoped = !global_uncertainty(reasons);
+  scene_runtime::manager().note_source_invalidation(reasons, scoped);
   if (scoped && item.count) {
     std::array<ID3D12Resource*, 8> targets{};
     std::array<std::uint64_t, 8> generations{};
@@ -283,12 +284,12 @@ void STDMETHODCALLTYPE legacy(ID3D12GraphicsCommandList* list, UINT count, const
   if (metadata_complete && barriers) {
     for (UINT n = 0; n < count; ++n) {
       const auto& b = barriers[n];
-      if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING)
-        uncertainty |= InvalidationAliasOrDiscard;
-      else if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION) {
-        if (b.Flags == D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY || b.Flags == D3D12_RESOURCE_BARRIER_FLAG_END_ONLY)
-          uncertainty |= InvalidationSplitBarrier;
-        else if (b.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE)
+      if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
+        if (!b.Aliasing.pResourceBefore || !b.Aliasing.pResourceAfter)
+          uncertainty |= InvalidationAliasOrDiscard;
+      } else if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION) {
+        if (b.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE && b.Flags != D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY &&
+            b.Flags != D3D12_RESOURCE_BARRIER_FLAG_END_ONLY)
           uncertainty |= InvalidationBarrierBatch;
         if (!b.Transition.pResource)
           uncertainty |= InvalidationBarrierBatch;
@@ -462,11 +463,7 @@ void STDMETHODCALLTYPE enhanced(ID3D12GraphicsCommandList7* list, UINT count, co
         continue;
       for (UINT n = 0; n < groups[g].NumBarriers; ++n) {
         const auto& b = groups[g].pTextureBarriers[n];
-        if ((b.SyncBefore & D3D12_BARRIER_SYNC_SPLIT) != 0 || (b.SyncAfter & D3D12_BARRIER_SYNC_SPLIT) != 0)
-          uncertainty |= InvalidationSplitBarrier;
-        if (b.Flags == D3D12_TEXTURE_BARRIER_FLAG_DISCARD)
-          uncertainty |= InvalidationAliasOrDiscard;
-        else if (b.Flags != D3D12_TEXTURE_BARRIER_FLAG_NONE)
+        if (b.Flags != D3D12_TEXTURE_BARRIER_FLAG_NONE && b.Flags != D3D12_TEXTURE_BARRIER_FLAG_DISCARD)
           uncertainty |= InvalidationBarrierBatch;
         if (!b.pResource)
           uncertainty |= InvalidationBarrierBatch;
@@ -528,7 +525,7 @@ bool install_active_end(ID3D12GraphicsCommandList4* list) noexcept {
     ++active_end_count;
   return installed;
 }
-}  /* namespace */
+} /* namespace */
 
 /*
  * The first call records the shared table; every call installs or re-verifies the eight hooks and the known
@@ -592,4 +589,4 @@ void invalidate_recording(standalone::List& item, std::uint32_t reasons) noexcep
 bool operational() noexcept {
   return enabled.load();
 }
-}  /* namespace azp::list_hooks */
+} /* namespace azp::list_hooks */

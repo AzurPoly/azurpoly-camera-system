@@ -22,6 +22,9 @@ enum InvalidationFlags : std::uint32_t {
   InvalidationUnobservedWork = 32,
   InvalidationObserverDisabled = 64,
   InvalidationResetFailed = 128,
+  InvalidationExecuteBundle = 256,
+  InvalidationExecuteIndirect = 512,
+  InvalidationPredication = 1024,
 };
 /*
  * Installs, or re-verifies, the boundary hooks on the one shared command-list table: QI7 must return this
@@ -51,4 +54,4 @@ void invalidate_recording(standalone::List&, std::uint32_t reason_flags = Invali
  * False once a changed or failed hook has disabled capture; existing recordings stay invalid until Reset.
  */
 bool operational() noexcept;
-}  /* namespace azp::list_hooks */
+} /* namespace azp::list_hooks */

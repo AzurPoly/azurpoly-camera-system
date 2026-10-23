@@ -24,10 +24,10 @@ bool same_description(const D3D12_RESOURCE_DESC& a, const D3D12_RESOURCE_DESC& b
          a.MipLevels == b.MipLevels && a.Format == b.Format && a.SampleDesc.Count == b.SampleDesc.Count &&
          a.SampleDesc.Quality == b.SampleDesc.Quality;
 }
-}  /* namespace */
+} /* namespace */
 
 SceneCaptureManager::SceneCaptureManager(SceneHandoff& handoff) noexcept : handoff_(handoff) {}
-SceneCaptureManager::~SceneCaptureManager() = default;  /* Native device/timeline leases intentionally process-lifetime. */
+SceneCaptureManager::~SceneCaptureManager() = default; /* Native device/timeline leases intentionally process-lifetime. */
 
 /*
  * Retains the simulator's device with its fence timeline. A second registration must agree with the first
@@ -256,6 +256,37 @@ void SceneCaptureManager::apply_source_draw(CaptureRecording& item, source_state
   }
 }
 /*
+ * Counts the hook condition that revoked source evidence. These counters are diagnostic only; the caller's
+ * existing scoped/global invalidation still decides the safety action.
+ */
+void SceneCaptureManager::note_source_invalidation(std::uint32_t reasons, bool scoped) noexcept {
+  const std::lock_guard lock(mutex_);
+  auto& s = stats_.invalidations;
+  ++(scoped ? s.scoped : s.global);
+  if (reasons & list_hooks::InvalidationPassBegin)
+    ++s.pass_begin;
+  if (reasons & list_hooks::InvalidationPassState)
+    ++s.pass_state;
+  if (reasons & list_hooks::InvalidationBarrierBatch)
+    ++s.barrier_batch;
+  if (reasons & list_hooks::InvalidationSplitBarrier)
+    ++s.split_barrier;
+  if (reasons & list_hooks::InvalidationAliasOrDiscard)
+    ++s.alias_or_discard;
+  if (reasons & list_hooks::InvalidationUnobservedWork)
+    ++s.unobserved_work;
+  if (reasons & list_hooks::InvalidationObserverDisabled)
+    ++s.observer_disabled;
+  if (reasons & list_hooks::InvalidationResetFailed)
+    ++s.reset_failed;
+  if (reasons & list_hooks::InvalidationExecuteBundle)
+    ++s.execute_bundle;
+  if (reasons & list_hooks::InvalidationExecuteIndirect)
+    ++s.execute_indirect;
+  if (reasons & list_hooks::InvalidationPredication)
+    ++s.predication;
+}
+/*
  * Invalidates all source-state evidence for an uncertain recording. Later capture must use a genuinely
  * renewed observation sequence.
  */
@@ -295,6 +326,23 @@ void SceneCaptureManager::invalidate_source_targets(List& list,
   }
 }
 /*
+ * Applies DiscardResource only to the resource named by the native call. An unrelated FSR scratch discard
+ * cannot affect a different texture; a camera-source discard remains conservative until a later absolute
+ * render-target transition re-establishes its state.
+ */
+void SceneCaptureManager::observe_source_discard(List& list, ID3D12Resource* resource) noexcept {
+  const std::lock_guard lock(mutex_);
+  auto& s = stats_.invalidations;
+  ++s.discard_calls;
+  auto& item = list.capture;
+  const auto* source = source_candidate(resource);
+  if (!item.admitted || !source)
+    return;
+  ++s.source_discards;
+  item.source_touched = true;
+  item.source_effects.append({{reinterpret_cast<std::uint64_t>(source->native), source->generation}, source_state::Effect::Kind::other});
+}
+/*
  * Appends legacy resource transitions in their recording order, invalidating ambiguous aliases or
  * unsupported state rather than guessing a layout.
  */
@@ -307,12 +355,14 @@ void SceneCaptureManager::observe_source_legacy(List& list, const D3D12_RESOURCE
   if (!item.admitted)
     return;
   if (barrier.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
+    ++stats_.invalidations.legacy_aliases;
     if (!barrier.Aliasing.pResourceBefore || !barrier.Aliasing.pResourceAfter) {
       item.source_touched = true;
       item.source_effects.invalidate();
     } else {
       for (auto* aliased : {barrier.Aliasing.pResourceBefore, barrier.Aliasing.pResourceAfter})
         if (const auto* candidate = source_candidate(aliased)) {
+          ++stats_.invalidations.source_aliases;
           item.source_touched = true;
           item.source_effects.append(
               {{reinterpret_cast<std::uint64_t>(aliased), candidate->generation}, source_state::Effect::Kind::other});
@@ -324,6 +374,8 @@ void SceneCaptureManager::observe_source_legacy(List& list, const D3D12_RESOURCE
   if (!source)
     return;
   item.source_touched = true;
+  if (barrier.Flags == D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY || barrier.Flags == D3D12_RESOURCE_BARRIER_FLAG_END_ONLY)
+    ++stats_.invalidations.legacy_source_splits;
   if (barrier.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE ||
       (barrier.Transition.Subresource != 0 && barrier.Transition.Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES)) {
     item.source_effects.append({{reinterpret_cast<std::uint64_t>(source->native), source->generation}, source_state::Effect::Kind::other});
@@ -331,6 +383,8 @@ void SceneCaptureManager::observe_source_legacy(List& list, const D3D12_RESOURCE
   }
   const auto kind = barrier.Transition.StateAfter == D3D12_RESOURCE_STATE_RENDER_TARGET ? source_state::Effect::Kind::legacy_rt
                                                                                         : source_state::Effect::Kind::other;
+  if (kind == source_state::Effect::Kind::legacy_rt)
+    ++stats_.invalidations.legacy_rt;
   item.source_effects.append({{reinterpret_cast<std::uint64_t>(source->native), source->generation}, kind});
 }
 /*
@@ -346,6 +400,10 @@ void SceneCaptureManager::observe_source_enhanced(List& list, const D3D12_TEXTUR
   if (!item.admitted || !source)
     return;
   item.source_touched = true;
+  if ((barrier.SyncBefore & D3D12_BARRIER_SYNC_SPLIT) || (barrier.SyncAfter & D3D12_BARRIER_SYNC_SPLIT))
+    ++stats_.invalidations.enhanced_source_splits;
+  if (barrier.Flags == D3D12_TEXTURE_BARRIER_FLAG_DISCARD)
+    ++stats_.invalidations.enhanced_source_discards;
   const auto& range = barrier.Subresources;
   const bool whole = range.NumMipLevels == 0 ? range.IndexOrFirstMipLevel == 0 || range.IndexOrFirstMipLevel == UINT_MAX
                                              : range.IndexOrFirstMipLevel == 0 && range.NumMipLevels == 1 && range.FirstArraySlice == 0 &&
@@ -358,6 +416,8 @@ void SceneCaptureManager::observe_source_enhanced(List& list, const D3D12_TEXTUR
   const auto kind = barrier.LayoutAfter == D3D12_BARRIER_LAYOUT_RENDER_TARGET && barrier.AccessAfter == D3D12_BARRIER_ACCESS_RENDER_TARGET
                         ? source_state::Effect::Kind::enhanced_rt
                         : source_state::Effect::Kind::other;
+  if (kind == source_state::Effect::Kind::enhanced_rt)
+    ++stats_.invalidations.enhanced_rt;
   item.source_effects.append({{reinterpret_cast<std::uint64_t>(source->native), source->generation}, kind});
 }
 /*
@@ -802,9 +862,11 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
   std::uint16_t mask = 0;
   bool work = false, consumer = false, input_copy = false;
   bool source_work = false, unknown_lists = false;
+  std::uint64_t unknown_list_count = 0;
   for (UINT index = 0; index < count; ++index) {
     if (unknown(index)) {
       unknown_lists = true;
+      ++unknown_list_count;
       continue;
     }
     const auto& item = items[index]->capture;
@@ -816,8 +878,11 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
     input_copy |= item.consumer && owner.input_active && item.input_epoch == owner.input_epoch;
     source_work |= item.source_touched;
   }
-  if (unknown_lists && !work && owner.native && compatible_queue(queue))
+  if (unknown_lists && !work && owner.native && compatible_queue(queue)) {
     owner.source_states.invalidate_all();
+    ++stats_.invalidations.unknown_batches;
+    stats_.invalidations.unknown_lists += unknown_list_count;
+  }
   if (!work || !owner.native || (!mask && !consumer && !source_work))
     return 0;
   const auto result = begin_transaction(queue, mask, false);
@@ -837,13 +902,16 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
     }
     transaction_.source_work = source_work;
     owner.source_states.begin_batch();
-    if (unknown_lists)
+    if (unknown_lists) {
       owner.source_states.invalidate_all();
-    else
+      ++stats_.invalidations.unknown_batches;
+      stats_.invalidations.unknown_lists += unknown_list_count;
+    } else
       for (UINT index = 0; index < count; ++index) {
         const auto& item = items[index]->capture;
         if (item.source_touched) {
-          owner.source_states.apply(item.source_effects);
+          if (!owner.source_states.apply(item.source_effects))
+            ++stats_.invalidations.invalid_recordings;
           if (source_tracking_)
             for (std::size_t lease_index = 0; lease_index < item.source_lease_count; ++lease_index) {
               const auto& lease = item.source_leases[lease_index];
@@ -1090,4 +1158,4 @@ SceneCaptureManager::Statistics SceneCaptureManager::statistics() const noexcept
   const std::lock_guard lock(mutex_);
   return stats_;
 }
-}  /* namespace azp */
+} /* namespace azp */

@@ -349,9 +349,9 @@ class ControlLoop {
     status_.heartbeat = in.now;
     std::snprintf(status_.night_vision_message, sizeof(status_.night_vision_message), "%s", camera.night_vision_message.c_str());
     if (const auto& measured = output.brightness; measured.sequence && camera.night_vision)
-      std::snprintf(status_.night_vision_message, sizeof(status_.night_vision_message), "%s | gain %.0f | brightness %.2f (black %.0f%%, white %.0f%%)",
-                    camera.night_vision_message.c_str(), std::exp2(ir_exposure_.ev()), 1 - measured.mean, 100 * measured.white,
-                    100 * measured.black);
+      std::snprintf(status_.night_vision_message, sizeof(status_.night_vision_message),
+                    "%s | gain %.0f | brightness %.2f (black %.0f%%, white %.0f%%)", camera.night_vision_message.c_str(),
+                    std::exp2(ir_exposure_.ev()), 1 - measured.mean, 100 * measured.white, 100 * measured.black);
     else if (measured.sequence)
       std::snprintf(status_.night_vision_message, sizeof(status_.night_vision_message),
                     "TV | exposure %+.1f EV | brightness %.2f (black %.0f%%, white %.0f%%)", in.settings.tv_exposure, measured.mean,
@@ -426,6 +426,33 @@ class ControlLoop {
       last_escaped_invalidations_ = output.capture.escaped_invalidations;
       next_gpu_log_ = in.now + 10000;
     }
+    const auto& invalidation = output.capture.invalidations;
+    if (!(invalidation == last_invalidation_log_) && in.now >= next_invalidation_log_) {
+      char detail[1024]{};
+      std::snprintf(
+          detail, sizeof(detail),
+          "GPU source evidence: global=%llu scoped=%llu unknown_batches=%llu/%llu_lists invalid_recordings=%llu; "
+          "causes pass=%llu/%llu_state barrier=%llu split=%llu alias_discard=%llu unobserved=%llu observer=%llu reset=%llu "
+          "bundle=%llu indirect=%llu predication=%llu; exact discard=%llu/%llu_source alias=%llu/%llu_source "
+          "source_split=%llu/%llu legacy/enhanced source_discard=%llu RT=%llu/%llu legacy/enhanced; tail=%s",
+          static_cast<unsigned long long>(invalidation.global), static_cast<unsigned long long>(invalidation.scoped),
+          static_cast<unsigned long long>(invalidation.unknown_batches), static_cast<unsigned long long>(invalidation.unknown_lists),
+          static_cast<unsigned long long>(invalidation.invalid_recordings), static_cast<unsigned long long>(invalidation.pass_begin),
+          static_cast<unsigned long long>(invalidation.pass_state), static_cast<unsigned long long>(invalidation.barrier_batch),
+          static_cast<unsigned long long>(invalidation.split_barrier), static_cast<unsigned long long>(invalidation.alias_or_discard),
+          static_cast<unsigned long long>(invalidation.unobserved_work), static_cast<unsigned long long>(invalidation.observer_disabled),
+          static_cast<unsigned long long>(invalidation.reset_failed), static_cast<unsigned long long>(invalidation.execute_bundle),
+          static_cast<unsigned long long>(invalidation.execute_indirect), static_cast<unsigned long long>(invalidation.predication),
+          static_cast<unsigned long long>(invalidation.discard_calls), static_cast<unsigned long long>(invalidation.source_discards),
+          static_cast<unsigned long long>(invalidation.legacy_aliases), static_cast<unsigned long long>(invalidation.source_aliases),
+          static_cast<unsigned long long>(invalidation.legacy_source_splits),
+          static_cast<unsigned long long>(invalidation.enhanced_source_splits),
+          static_cast<unsigned long long>(invalidation.enhanced_source_discards), static_cast<unsigned long long>(invalidation.legacy_rt),
+          static_cast<unsigned long long>(invalidation.enhanced_rt), output.capture.tail_status);
+      log_status(status_, detail);
+      last_invalidation_log_ = invalidation;
+      next_invalidation_log_ = in.now + 10000;
+    }
   }
 
   /*
@@ -480,7 +507,8 @@ class ControlLoop {
    */
   bool session_applied_ = false, changing_session_ = false;
   std::uint64_t applied_session_epoch_ = 0, pending_session_epoch_ = 0, transition_token_ = 0;
-  std::uint64_t next_telemetry_ = 0, next_cleanup_ = 0, next_recovery_ = 0, next_log_ = 0, next_gpu_log_ = 0, last_frames_ = 0;
+  std::uint64_t next_telemetry_ = 0, next_cleanup_ = 0, next_recovery_ = 0, next_log_ = 0, next_gpu_log_ = 0, next_invalidation_log_ = 0,
+                last_frames_ = 0;
   /*
    * Status publication and change detection for the bridge log.
    */
@@ -489,6 +517,7 @@ class ControlLoop {
   std::uint64_t last_stop_sequence_ = 0;
   queue_hooks::Statistics last_queue_log_{};
   std::uint64_t last_escaped_invalidations_ = 0;
+  SceneCaptureManager::InvalidationStatistics last_invalidation_log_{};
   std::string zoom_detail_;
   /*
    * Engine-callback time over the last full second, in ms per second.
@@ -558,7 +587,7 @@ DWORD WINAPI run(void*) noexcept {
     return ERROR_NOT_ENOUGH_MEMORY;
   }
 }
-}  /* namespace */
+} /* namespace */
 /*
  * Starts one bridge worker only inside the expected simulator executable. It pins this DLL for callbacks
  * that can outlive the EXE and closes only the thread handle, not the worker itself.

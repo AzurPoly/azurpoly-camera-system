@@ -27,7 +27,8 @@ struct Effect {
  * CPU recording evidence only. Apply immutable recordings in actual native Execute order, including every
  * replay. Invalid recordings retain their prior effects/count so callers can preserve separate
  * source-touched diagnostics. No initial resource state is assumed. Callers own synchronization and classify
- * verified absolute RT evidence; split/alias/unknown/pass/truncation calls must invalidate their recording.
+ * verified absolute RT evidence; split/alias calls invalidate the affected resource while
+ * unknown/pass/truncation calls invalidate their recording.
  * This does not infer state from a draw or format.
  */
 struct Recording {
@@ -93,4 +94,4 @@ class Tracker {
   std::array<Slot, capacity> sources_{};
 };
 
-}  /* namespace azp::source_state */
+} /* namespace azp::source_state */

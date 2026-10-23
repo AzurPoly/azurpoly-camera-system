@@ -67,7 +67,7 @@ struct Registry {
    * and metadata callbacks never take it.
    */
   std::mutex observation_mutex;
-  std::atomic<std::uint64_t> observation_epoch{1};  /* Odd: observing; even: idle. */
+  std::atomic<std::uint64_t> observation_epoch{1}; /* Odd: observing; even: idle. */
   ID3D12Device* device{};
   std::uint64_t next_id = 0;
   UINT rtv_stride{};
@@ -231,7 +231,7 @@ struct KnownListCache {
   }
 };
 thread_local KnownListCache known_lists;
-}  /* namespace */
+} /* namespace */
 
 void Resource::retire() noexcept {
   alive.store(false, std::memory_order_release);
@@ -656,10 +656,11 @@ struct Targets {
   }
   static void apply(List&, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, BOOL, const D3D12_CPU_DESCRIPTOR_HANDLE*) {}
 };
+template <std::uint32_t Reason>
 struct Unsupported {
   template <class... Args>
   static void apply(List& l, Args...) {
-    list_hooks::invalidate_recording(l);
+    list_hooks::invalidate_recording(l, Reason);
   }
 };
 struct Predication {
@@ -670,7 +671,16 @@ struct Predication {
    */
   static void apply(List& list, ID3D12Resource* buffer, UINT64, D3D12_PREDICATION_OP) {
     if (buffer)
-      Unsupported::apply(list);
+      Unsupported<list_hooks::InvalidationPredication>::apply(list);
+  }
+};
+struct Discard {
+  /*
+   * DiscardResource names its only affected resource. Preserve unrelated source evidence and revoke only a
+   * positively identified camera source.
+   */
+  static void apply(List& list, ID3D12Resource* resource, const D3D12_DISCARD_REGION*) {
+    scene_runtime::manager().observe_source_discard(list, resource);
   }
 };
 /*
@@ -751,10 +761,10 @@ bool hook_state(ID3D12GraphicsCommandList* list, bool active = false) {
   }
   ok &= STATE(11, ClearState, ClearState)::install(list, active);
   ok &= STATE(46, OMSetRenderTargets, Targets)::install(list, active);
-  ok &= STATE(27, ExecuteBundle, Unsupported)::install(list, active);
-  ok &= STATE(59, ExecuteIndirect, Unsupported)::install(list, active);
+  ok &= STATE(27, ExecuteBundle, Unsupported<list_hooks::InvalidationExecuteBundle>)::install(list, active);
+  ok &= STATE(59, ExecuteIndirect, Unsupported<list_hooks::InvalidationExecuteIndirect>)::install(list, active);
   ok &= STATE(55, SetPredication, Predication)::install(list, active);
-  ok &= STATE(51, DiscardResource, Unsupported)::install(list, active);
+  ok &= STATE(51, DiscardResource, Discard)::install(list, active);
   return ok;
 }
 #undef STATE
@@ -765,7 +775,7 @@ bool same_interface(ID3D12Device* device, REFIID iid) {
     p->Release();
   return ok;
 }
-}  /* namespace */
+} /* namespace */
 
 /*
  * Establishes the retained native device and installs resource, recording and queue observations using
@@ -901,4 +911,4 @@ void collect_retired_objects() noexcept {
     std::erase_if(r.rtvs, [](const auto& p) { return !p.second.resource || !p.second.resource->alive; });
   });
 }
-}  /* namespace azp::standalone */
+} /* namespace azp::standalone */
