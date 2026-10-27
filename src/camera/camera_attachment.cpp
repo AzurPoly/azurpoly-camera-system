@@ -1,5 +1,5 @@
 /*
- * Attaches the camera node to the Rafale scene hierarchy so its local mount moves with the rendered
+ * Attaches the camera node to the aircraft scene hierarchy so its local mount moves with the rendered
  * aircraft. A native update callback reapplies the WASM look direction using the current aircraft transform,
  * avoiding positional lag from asynchronous telemetry.
  */

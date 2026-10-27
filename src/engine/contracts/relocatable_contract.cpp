@@ -36,6 +36,10 @@ constexpr std::uint32_t Chunk = 32768, Unknown = std::numeric_limits<std::uint32
 constexpr std::uint32_t EvidenceRun = 24;
 constexpr std::uint64_t CodeLimit = 192ull * 1024 * 1024, ReadLimit = 512ull * 1024 * 1024;
 using Binding = std::pair<std::uint32_t, std::uint32_t>;
+/*
+ * Bindings pair a symbol with its RVA. Keys from symbols.size() on are shifted-field groups paired with their
+ * delta (two's complement), so the symbol agreement rules also make every field of a group move together.
+ */
 struct Candidate {
   std::vector<Binding> bindings;
   std::uint32_t variant = 0;
@@ -105,7 +109,7 @@ class Resolver {
   ContractResolution run() {
     if (!prepare() || !scan() || !infer_short_templates() || !constrain())
       return result_;
-    std::vector<std::uint32_t> resolved(model_.symbols.size(), Unknown);
+    std::vector<std::uint32_t> resolved(model_.symbols.size() + groups_, Unknown);
     for (std::size_t i = 0; i < model_.symbols.size(); ++i)
       if (model_.symbols[i].kind == SectionKind::image_base)
         resolved[i] = 0;
@@ -151,6 +155,7 @@ class Resolver {
       fail("pointer_changed_during_resolution");
       return result_;
     }
+    resolved.resize(model_.symbols.size());
     result_.symbols = std::move(resolved);
     result_.valid = true;
     return result_;
@@ -253,9 +258,9 @@ class Resolver {
         template_bytes += alternative.size();
       operand_count += code.operands.size();
       if (code.symbol >= model_.symbols.size() || code.bytes.empty() || code.bytes.size() > 16384 || template_bytes > 262144 ||
-          operand_count > 65536 || code.alternatives.size() > 8 || (code.minimum_seed != 7 && code.minimum_seed != 8) ||
-          model_.symbols[code.symbol].kind != SectionKind::code || code.bytes.size() > model_.symbols[code.symbol].extent ||
-          template_for_symbol_[code.symbol] != Unknown)
+          operand_count > 65536 || code.alternatives.size() > 8 || code.fields.size() > 16 ||
+          (code.minimum_seed != 7 && code.minimum_seed != 8) || model_.symbols[code.symbol].kind != SectionKind::code ||
+          code.bytes.size() > model_.symbols[code.symbol].extent || template_for_symbol_[code.symbol] != Unknown)
         return fail("invalid_code_template");
       for (std::size_t alternative = 0; alternative < code.alternatives.size(); ++alternative) {
         const auto& body = code.alternatives[alternative];
@@ -282,6 +287,17 @@ class Resolver {
           state.invariant[at] = 0;
           state.seedable[at] = 0;
         }
+      }
+      for (const auto& field : code.fields) {
+        if (field.group >= 16 || std::uint64_t(field.offset) + 4 > code.bytes.size())
+          return fail("invalid_shifted_field");
+        for (std::uint32_t at = field.offset; at < field.offset + 4; ++at) {
+          if (!state.invariant[at])
+            return fail("overlapping_shifted_field");
+          state.invariant[at] = 0;
+          state.seedable[at] = 0;
+        }
+        groups_ = std::max(groups_, field.group + 1);
       }
       for (const auto& alternative : code.alternatives) {
         bool fixed_difference = false;
@@ -326,6 +342,7 @@ class Resolver {
     }
     if (!has_seed)
       return fail("no_discoverable_template");
+    template_for_symbol_.resize(model_.symbols.size() + groups_, Unknown);
     std::uint64_t constant_bytes = 0;
     for (const auto& constant : model_.constants) {
       constant_bytes += constant.bytes.size();
@@ -452,6 +469,14 @@ class Resolver {
     if (candidate.variant == Unknown)
       return false;
     candidate.bindings.emplace_back(code.symbol, rva);
+    const auto& body = candidate.variant ? code.alternatives[candidate.variant - 1] : code.bytes;
+    for (const auto& field : code.fields) {
+      const auto delta = std::int64_t(static_cast<std::int32_t>(key(bytes.data() + field.offset))) -
+                         static_cast<std::int32_t>(key(body.data() + field.offset));
+      if (delta % 8 || delta < -4096 || delta > 4096)
+        return false;
+      candidate.bindings.emplace_back(static_cast<std::uint32_t>(model_.symbols.size() + field.group), static_cast<std::uint32_t>(delta));
+    }
     for (const auto& operand : code.operands) {
       const auto value = operand.width == 1 ? bytes[operand.offset] : key(bytes.data() + operand.offset);
       std::int64_t target = value;
@@ -601,7 +626,7 @@ class Resolver {
       std::snprintf(text, sizeof(text), "; at RVA 0x%x: %zu differing byte(s) in %zu span(s)", places[n], differing, spans.size());
       line += text;
       if (!differing)
-        line += ", so an address operand, its section or a relation refused this place";
+        line += ", so an address operand, its section, a shifted field or a relation refused this place";
       for (std::size_t span = 0; span < spans.size() && span < 8; ++span) {
         const auto begin = spans[span].first, end = std::min(spans[span].second, begin + 16);
         std::snprintf(text, sizeof(text), " | +%zu found ", begin);
@@ -702,7 +727,7 @@ class Resolver {
   std::vector<std::uint32_t> template_for_symbol_;
   std::unordered_map<std::uint32_t, std::vector<std::pair<std::size_t, std::uint32_t>>> seeds_;
   std::uint64_t code_size_ = 0;
-  std::uint32_t maximum_seed_ = 0, attempts_ = 0;
+  std::uint32_t maximum_seed_ = 0, attempts_ = 0, groups_ = 0;
 };
 } /* namespace */
 

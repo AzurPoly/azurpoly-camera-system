@@ -67,7 +67,8 @@ inline constexpr bool valid_render_rate(unsigned rate) noexcept {
 inline constexpr unsigned kCameraRowPitch = (kCameraWidth * 4 + 255) & ~255u;
 
 /*
- * Path component that identifies the Rafale package in the loaded aircraft path.
+ * Identifies the Rafale in the loaded aircraft path: any SimObjects/Airplanes folder whose name starts with
+ * azurpoly_rafale.
  */
 inline constexpr std::string_view kRafalePackageMarker = "simobjects/airplanes/azurpoly_rafale";
 /*
@@ -91,7 +92,8 @@ inline constexpr bool wasm_image_format(unsigned format) noexcept {
   return false;
 }
 /*
- * Match a complete path component (or component sequence), independent of drive, slash direction and case.
+ * Match a path component sequence starting at a component boundary, independent of drive, slash direction
+ * and case; the marker's last component only needs to be a prefix.
  */
 bool path_contains(std::string_view path, std::string_view marker) noexcept;
 bool is_rafale_package(std::string_view aircraft_path) noexcept;

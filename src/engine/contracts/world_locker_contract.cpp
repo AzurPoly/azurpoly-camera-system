@@ -6,6 +6,7 @@
 
 #include "world_locker_contract.hpp"
 #include <algorithm>
+#include <cstring>
 #include "../memory.hpp"
 #include "../rtti_vtables.hpp"
 #include "generated/world_locker_contract_model.hpp"
@@ -82,6 +83,36 @@ bool same_image(const discovery::Inventory& a, const discovery::Inventory& b) {
       return false;
   return true;
 }
+/*
+ * Lets the engine object behind the preload gates grow. service_update, add_zone88 and add_zone78 each call
+ * the same accessor (model symbol reference_222) and test a byte flag of the object it returns with
+ * `cmp byte [reg+disp32], 0`: +0xD0B0 in both registrations, +0xD190 in the update. MSFS 1.9.12.0 and
+ * 1.9.18.0 (SU7) moved all three by +0xE0 and changed nothing else in these bodies. The three displacements
+ * form one shifted-field group, so they must move together; every other byte, operand and relation stays
+ * exact. AZP never reads these flags itself.
+ */
+const relocatable::ContractModel& reviewed_preload_model() {
+  static const auto value = [] {
+    auto out = world_locker_contract_model::model();
+    struct Gate {
+      const char* name;
+      std::uint32_t offset, displacement;
+    };
+    for (const auto& gate : {Gate{"service_update", 671, 0xd190}, Gate{"add_zone88", 78, 0xd0b0}, Gate{"add_zone78", 41, 0xd0b0}}) {
+      const auto symbol = world_locker_contract_model::symbol_index(gate.name);
+      const auto code = std::find_if(out.code.begin(), out.code.end(), [&](const auto& x) { return x.symbol == symbol; });
+      std::uint32_t displacement = 0;
+      if (code == out.code.end() || code->bytes.size() < gate.offset + 5 || code->bytes[gate.offset - 2] != 0x80 ||
+          code->bytes[gate.offset - 1] != 0xba || code->bytes[gate.offset + 4] != 0)
+        continue;
+      std::memcpy(&displacement, code->bytes.data() + gate.offset, sizeof(displacement));
+      if (displacement == gate.displacement)
+        code->fields.push_back({gate.offset, 0});
+    }
+    return out;
+  }();
+  return value;
+}
 }  /* namespace */
 
 /*
@@ -98,7 +129,7 @@ WorldLockerContract resolve_world_locker_contract(discovery::ImageReader& reader
   };
   if (!image_base || !same_image(image, parse_verified_image_headers(reader)))
     return refused("identite de l'image.");
-  const auto& model = world_locker_contract_model::model();
+  const auto& model = reviewed_preload_model();
   const auto resolved = relocatable::resolve_contract(reader, image, model, {}, image_base);
   if (!resolved.valid)
     return refused(resolved.error);

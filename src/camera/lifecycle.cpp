@@ -378,11 +378,6 @@ bool ViewResizeRecovery::finish(engine_camera::ManagerToken owner, engine_camera
   return true;
 }
 
-void ViewResizeRecovery::release_resize_authorization() noexcept {
-  if (pending_ && !failed_)
-    resize_issued_ = false;
-}
-
 void ViewResizeRecovery::mark_failed() noexcept {
   failed_ = true;
   closed_seen_ = resize_issued_ = false;

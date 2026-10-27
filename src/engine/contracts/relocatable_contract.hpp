@@ -25,6 +25,14 @@ struct AddressOperand {
   std::uint32_t target_symbol = 0;
   std::int32_t addend = 0;
 };
+/*
+ * A reviewed signed 32-bit member displacement that may move with its engine structure. The delta is the
+ * found value minus the reviewed one: a multiple of 8 bytes, at most 4 KiB either way, and the same for every
+ * field of the group across all templates of the model. Group numbers are below 16.
+ */
+struct ShiftedField {
+  std::uint32_t offset = 0, group = 0;
+};
 struct CodeTemplate {
   CodeTemplate() = default;
   CodeTemplate(std::uint32_t symbol_value,
@@ -46,6 +54,11 @@ struct CodeTemplate {
    * this is not a wildcard and a candidate must match one whole body.
    */
   std::vector<std::vector<std::uint8_t>> alternatives;
+  /*
+   * At most 16 per template. Only a caller that has reviewed what the field is, and that never reads it
+   * itself, may declare one.
+   */
+  std::vector<ShiftedField> fields;
 };
 struct DataConstant {
   std::uint32_t symbol = 0;
@@ -76,10 +89,12 @@ struct ContractResolution {
 };
 
 /*
- * Matches complete, externally decoded instruction templates. All non-operand bytes remain exact, including
- * member displacements, opcodes and registers. Explicit alternative bodies are matched whole and share the
- * same decoded operand layout; bytes from different alternatives can never be combined. A decoded operand
- * addresses target_symbol + addend.
+ * Matches complete, externally decoded instruction templates. All bytes other than address operands and
+ * declared shifted fields remain exact, including every other member displacement, opcodes and registers.
+ * A shifted field's group must move by one common delta across the whole model, so a structure that grew
+ * is accepted only when every declared use of it moved together. Explicit alternative bodies are matched
+ * whole and share the same decoded operand and field layout; bytes from different alternatives can never
+ * be combined. A decoded operand addresses target_symbol + addend.
  * PC-relative fields are signed and based on the instruction-end pc_offset; image RVAs are unsigned. The
  * caller, not this matcher, proves operand spans are actual decoded address operands and provides complete
  * instruction/function boundaries. Scans all readable, executable, non-writable/non-discardable image

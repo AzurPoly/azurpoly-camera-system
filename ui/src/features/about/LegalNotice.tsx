@@ -55,7 +55,7 @@ export function LegalNotice({ appVersion, error, onBack }: LegalNoticeProps) {
 
         <section className="legal-panel">
           <p className="legal-page__eyebrow">Trademarks</p>
-          <p>Rafale is a registered name of Dassault Aviation.</p>
+          <p>Rafale is a registered trademark of Dassault Aviation.</p>
           <p>All other product names and trademarks are the property of their respective owners.</p>
         </section>
 

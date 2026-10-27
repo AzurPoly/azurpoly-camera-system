@@ -220,12 +220,6 @@ class ViewResizeRecovery {
                  const engine_camera::OwnedViewSnapshot& view) noexcept;
 
   bool finish(engine_camera::ManagerToken owner, engine_camera::EntryId id) noexcept;
-  /*
-   * Caller inspected a closed ready view but could not prove the existing Bitmap still matches the image size.
-   * Release the one-shot authorization so a later update may restore instead of sitting in wait after an
-   * unused resize token.
-   */
-  void release_resize_authorization() noexcept;
   bool pending() const noexcept { return pending_; }
   bool failed() const noexcept { return failed_; }
   void clear() noexcept { *this = {}; }  /* Explicit lifecycle reset, never automatic retry. */
@@ -274,7 +268,7 @@ UpdatePhase select_update_phase(const UpdateFacts& facts) noexcept;
  */
 enum class CameraPhase {
   initial_resize_failed, /* Hold if the aircraft changed meanwhile; otherwise latch the failure and remove. */
-  resolution_recovery,   /* Graphics settings changed: keep the ID, close the gate, restore dimensions. */
+  resolution_recovery,   /* Graphics settings changed: keep the ID, close the gate, restore dimensions and output. */
   warmup,                /* A new view waits, gate closed, for one engine update before its first resize. */
   render,                /* Ready: validate pose and attachment, then drive the gate. */
   view_wait,             /* The view is briefly unreadable: keep the ID with the gate closed. */

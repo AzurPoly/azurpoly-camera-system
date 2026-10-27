@@ -7,8 +7,9 @@
 namespace azp {
 
 /*
- * Matches complete path components with case and slash normalization. Component boundaries prevent a similar
- * aircraft/vendor name from being mistaken for the Rafale.
+ * Matches the marker from the start of a path component, with case and slash normalization. Its last
+ * component is a prefix, so every azurpoly_rafale* aircraft folder matches; the leading boundary keeps a
+ * folder that merely contains the name (another vendor's xazurpoly_rafale) out.
  */
 bool path_contains(std::string_view path, std::string_view marker) noexcept {
   const auto fold = [](char c) { return c == '\\' ? '/' : c >= 'A' && c <= 'Z' ? char(c + ('a' - 'A')) : c; };
@@ -18,7 +19,7 @@ bool path_contains(std::string_view path, std::string_view marker) noexcept {
     size_t n = 0;
     while (n < marker.size() && fold(path[i + n]) == fold(marker[n]))
       ++n;
-    if (n == marker.size() && (i + n == path.size() || fold(path[i + n]) == '/'))
+    if (n == marker.size())
       return true;
   }
   return false;

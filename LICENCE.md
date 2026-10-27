@@ -16,6 +16,12 @@ available from the public repository:
 
 https://github.com/AzurPoly/azurpoly-camera-system
 
+## Trademark notice
+
+Rafale is a registered trademark of Dassault Aviation.
+
+All other product names and trademarks are the property of their respective owners.
+
 The complete GNU General Public License version 3 follows unchanged.
 
                     GNU GENERAL PUBLIC LICENSE

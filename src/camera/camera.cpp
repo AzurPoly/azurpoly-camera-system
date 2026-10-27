@@ -366,8 +366,9 @@ bool publish_outputs(Runtime& runtime, SceneCaptureTicket ticket, ec::EntryId id
  * Malformed identity must not be downgraded to a transient failure. Every new retry still repeats the full
  * native guards.
  *
- * Primary-view resizing can overwrite mode2 size fields while its Bitmap remains pane-sized. Retain the
- * ownership; recovery may restore fields only when fresh output dimensions prove that no reallocation is needed.
+ * Primary-view resizing can overwrite mode2 size fields while its Bitmap remains pane-sized, and a renderer
+ * reset can reallocate that Bitmap at the primary size. Retain the ownership; closed-gate recovery restores
+ * the fields, and rebuilds the Bitmap only when fresh output dimensions prove the engine replaced it.
  *
  * Pool, entry table and owned view share one read-only region-query scope. Every field/trace is still
  * reread, and every queried region is revalidated before publishing pointers or calling the engine. Nothing
@@ -916,7 +917,8 @@ ec::EntryId create(void* opaque, ec::ManagerToken token, const ec::DescriptorSto
 }
 
 /*
- * Reinspects a closed owned entry and chooses initial resize or proven in-place dimension restoration.
+ * Reinspects a closed owned entry and chooses an output (re)allocating resize, used at creation and after the
+ * engine replaced the output, or proven in-place dimension restoration.
  * Far-plane and output changes are accepted only through the guarded view helpers.
  */
 bool resize_closed_entry(Runtime& runtime, ec::EntryId id, bool initialize_output = true) {
@@ -1357,29 +1359,33 @@ void observer(void* manager) noexcept {
           runtime.message = "Graphics settings changed; camera ID retained while its render gate closes.";
           bool restored_now = false;
           if (action == ViewResizeRecovery::Action::resize) {
-            const bool retainable = view.mode == 2 && view.resource_present;
-            const bool outputs_unchanged = retainable && view.output_dimensions == runtime.resized_dimensions[0];
-            if (!outputs_unchanged && retainable) {
-              runtime.resize_recovery.release_resize_authorization();
-            } else {
-              const bool restored = outputs_unchanged && resize_closed_entry(runtime, ownership.owned_id, false);
-              if (restored && runtime.resize_recovery.finish(ownership.owner, ownership.owned_id)) {
-                {
-                  const std::lock_guard lock(runtime.mutex);
-                  runtime.recovery.resumed_retained_resolution();
-                  runtime.stop_detail.clear();
-                }
-                runtime.message = "Camera dimensions restored without replacing entries or output textures; waiting for fresh frames.";
-                inspect_camera(runtime, ownership.owned_id, report, view);
-                restored_now = report.ready;
-              } else {
-                runtime.resize_recovery.mark_failed();
+            /*
+             * An AA/upscaler change keeps the output bitmap at the camera resolution: restore the fields in place.
+             * A renderer reset (2D/VR switch) has already replaced it with one of the primary size, which capture
+             * never recognizes: rebuild it at the camera resolution through the closed-gate initial resize.
+             */
+            const auto output = view.output_dimensions;
+            const bool outputs_unchanged = view.mode == 2 && view.resource_present && output == runtime.resized_dimensions[0];
+            if (resize_closed_entry(runtime, ownership.owned_id, !outputs_unchanged) &&
+                runtime.resize_recovery.finish(ownership.owner, ownership.owned_id)) {
+              {
+                const std::lock_guard lock(runtime.mutex);
+                runtime.recovery.resumed_retained_resolution();
+                runtime.stop_detail.clear();
               }
+              runtime.message = outputs_unchanged
+                                    ? "Camera dimensions restored without replacing entries or output textures; waiting for fresh frames."
+                                    : "Camera output rebuilt at its resolution after the simulator reallocated it at " +
+                                          std::to_string(output[0]) + " x " + std::to_string(output[1]) + "; waiting for fresh frames.";
+              inspect_camera(runtime, ownership.owned_id, report, view);
+              restored_now = report.ready;
+            } else {
+              runtime.resize_recovery.mark_failed();
             }
           }
           if (runtime.resize_recovery.failed()) {
             scene_handoff().stop_scene();
-            runtime.message = "Camera paused after graphics change: existing output could not be safely retained. Restart MSFS to resume.";
+            runtime.message = "Camera paused after graphics change: its output could not be safely restored. Restart MSFS to resume.";
           }
           if (restored_now)
             report.view_waiting = false;
