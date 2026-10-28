@@ -46,12 +46,15 @@ struct View {
 };
 /*
  * Render-pass scope of the current recording. The marked WASM upload may be replaced only outside every
- * active or suspended pass, on a recording that is not invalid. `epoch` records the hook epoch at Reset:
- * disabling capture advances that epoch, which invalidates every earlier recording.
+ * active or suspended pass, on a recording that is not invalid. Draw evidence may be retained for the
+ * color targets whose ordinary pass preserves their contents; `capture_targets` identifies those slots.
+ * `epoch` records the hook epoch at Reset: disabling capture advances that epoch, which invalidates every
+ * earlier recording.
  */
 struct PassScope {
   std::uint64_t epoch = 0;
   bool active = false, suspended = false, invalid = false;
+  std::uint8_t capture_targets = 0;
 };
 /*
  * One recording's reference to a camera source, taken from a live native argument.

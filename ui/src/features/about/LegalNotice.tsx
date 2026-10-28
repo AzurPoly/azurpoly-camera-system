@@ -13,7 +13,7 @@ export function LegalSummary({ appVersion, onOpen }: LegalSummaryProps) {
     <aside className="legal-summary">
       {appVersion && <p className="legal-summary__version">Version {appVersion}</p>}
       <p>
-        This application is experimental, use at your own risk. It is not compatible with Frame Generation.
+        This application is experimental, use at your own risk. It is not compatible with Frame Generation or ReShade.
         AzurPoly cannot guarantee that it will operate correctly for every user or system configuration. Please
         contact us if you encounter a problem.
       </p>

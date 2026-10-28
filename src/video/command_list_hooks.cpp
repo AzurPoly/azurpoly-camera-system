@@ -89,12 +89,13 @@ struct Guard {
  */
 struct Scope {
   bool known = false, active = false, suspended = false, invalid = false;
+  std::uint8_t capture_targets = 0;
 };
 Scope scope_of(const List* item) noexcept {
   if (!item || !item->alive.load(std::memory_order_acquire))
     return {};
   const auto& s = item->scope;
-  return {true, s.active, s.suspended, s.invalid || s.epoch != epoch.load()};
+  return {true, s.active, s.suspended, s.invalid || s.epoch != epoch.load(), s.capture_targets};
 }
 /*
  * A failed/changed hook may have missed pass calls. Never revive the previous recording's empty-pass
@@ -115,7 +116,7 @@ bool global_uncertainty(std::uint32_t reasons) noexcept {
  * the bound targets (pass begin, split barrier, alias/discard), only those sources are invalidated;
  * otherwise the whole recording is. The next capture must rebuild its proof from actual observed work.
  */
-void notify_invalidation(List& item, std::uint32_t reasons) noexcept {
+void notify_invalidation(List& item, std::uint32_t reasons, std::uint8_t target_mask = UINT8_MAX) noexcept {
   if (!reasons || !item.alive.load(std::memory_order_acquire))
     return;
   const OwnedWork owned;
@@ -126,6 +127,8 @@ void notify_invalidation(List& item, std::uint32_t reasons) noexcept {
     std::array<std::uint64_t, 8> generations{};
     UINT count = 0;
     for (UINT i = 0; i < item.count; ++i) {
+      if ((target_mask & (1u << i)) == 0)
+        continue;
       const auto& target = item.targets[i].resource;
       if (target && target->alive) {
         targets[count] = target->native;
@@ -143,7 +146,7 @@ void notify_invalidation(List& item, std::uint32_t reasons) noexcept {
  * Records the actual targets after a native draw. Source-state evidence is kept while idle so capture can
  * resume without guessing layouts.
  */
-void record_draw(List& item, bool allowed) noexcept {
+void record_draw(List& item, bool allowed, std::uint8_t target_mask = UINT8_MAX) noexcept {
   const OwnedWork owned;
   if (!standalone::graphics_admitted() || !item.ready || (!standalone::recording_observed(item) && !item.count))
     return;
@@ -151,6 +154,8 @@ void record_draw(List& item, bool allowed) noexcept {
   std::array<std::uint64_t, 8> ids;
   UINT count = 0;
   for (UINT i = 0; i < item.count; ++i) {
+    if ((target_mask & (1u << i)) == 0)
+      continue;
     const auto& target = item.targets[i];
     if (target.resource && target.resource->alive && !target.mip) {
       sources[count] = target.resource->native;
@@ -161,7 +166,8 @@ void record_draw(List& item, bool allowed) noexcept {
 }
 /*
  * After a nonzero draw: revokes evidence for an uncertain scope, then records the draw while the same
- * recording is current.
+ * recording is current. An ordinary render pass may retain draw evidence only for color targets whose
+ * ending access preserves their contents; capture itself still runs after the submitted pass has ended.
  */
 void after_draw(List& item) noexcept {
   const auto current = scope_of(&item);
@@ -172,7 +178,11 @@ void after_draw(List& item) noexcept {
     if (!item.alive.load(std::memory_order_acquire))
       return;
   }
-  record_draw(item, enabled.load() && !current.active && !current.suspended && !current.invalid);
+  const bool valid = enabled.load() && !current.suspended && !current.invalid;
+  if (valid && current.active)
+    record_draw(item, true, current.capture_targets);
+  else
+    record_draw(item, valid && !current.active);
 }
 void STDMETHODCALLTYPE
 draw(ID3D12GraphicsCommandList* list, UINT vertices, UINT instances, UINT first_vertex, UINT first_instance) noexcept {
@@ -305,10 +315,22 @@ void STDMETHODCALLTYPE legacy(ID3D12GraphicsCommandList* list, UINT count, const
   original(list, count, barriers);
 }
 bool install_active_end(ID3D12GraphicsCommandList4* list) noexcept;
+std::uint8_t target_mask(UINT count) noexcept {
+  return count >= 8 ? UINT8_MAX : static_cast<std::uint8_t>((1u << count) - 1u);
+}
+bool preserves_drawn_color(const D3D12_RENDER_PASS_RENDER_TARGET_DESC& target) noexcept {
+  const auto beginning = target.BeginningAccess.Type;
+  return (beginning == D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_DISCARD ||
+          beginning == D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE ||
+          beginning == D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR) &&
+         target.EndingAccess.Type == D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE;
+}
 /*
- * Tracks native render-pass scope and target metadata, refusing suspended/local-access cases that cannot
- * admit extra work. If the runtime changes the active vtable, the actual End slot is verified and hooked
- * before returning.
+ * Tracks native render-pass scope and target metadata. Draws into targets preserved by an ordinary,
+ * nonsuspending pass remain valid evidence because the private capture executes only at the queue tail,
+ * after EndRenderPass. Discarded, resolved, no-access, suspended and local-access targets are still
+ * invalidated conservatively. If the runtime changes the active vtable, the actual End slot is verified
+ * and hooked before returning.
  *
  * PRESERVE_LOCAL passes permit state setup between passes, but no added GPU operations. Refuse their entire
  * recording rather than inferring a resource's local-access lifetime from later barrier state alone.
@@ -335,6 +357,7 @@ void STDMETHODCALLTYPE begin(ID3D12GraphicsCommandList4* list,
   const auto identity = scope_of(item.get());
   if (identity.known) {
     auto& value = item->scope;
+    value.capture_targets = 0;
     if (value.active)
       value.invalid = true;
     if ((static_cast<UINT>(flags) & ~7u) != 0)
@@ -352,6 +375,12 @@ void STDMETHODCALLTYPE begin(ID3D12GraphicsCommandList4* list,
       value.invalid = true;
     value.active = true;
     value.suspended = (flags & D3D12_RENDER_PASS_FLAG_SUSPENDING_PASS) != 0;
+    const bool ordinary = !value.invalid && !identity.suspended && !value.suspended &&
+                          (flags & D3D12_RENDER_PASS_FLAG_RESUMING_PASS) == 0;
+    if (ordinary && targets)
+      for (UINT n = 0; n < count; ++n)
+        if (preserves_drawn_color(targets[n]))
+          value.capture_targets |= static_cast<std::uint8_t>(1u << n);
   }
   if (count > 8 || (count && !targets)) {
     item->targets = {};
@@ -363,10 +392,15 @@ void STDMETHODCALLTYPE begin(ID3D12GraphicsCommandList4* list,
     standalone::bind_render_targets(*item, count, handles.data(), FALSE);
   }
   const auto after_begin = scope_of(item.get());
-  notify_invalidation(*item, InvalidationPassBegin | scope_invalidation(identity) |
-                                 ((after_begin.invalid || after_begin.suspended || (flags & D3D12_RENDER_PASS_FLAG_RESUMING_PASS) != 0)
-                                      ? InvalidationPassState
-                                      : 0u));
+  const auto pass_uncertainty =
+      scope_invalidation(identity) |
+      ((after_begin.invalid || after_begin.suspended || (flags & D3D12_RENDER_PASS_FLAG_RESUMING_PASS) != 0)
+           ? InvalidationPassState
+           : 0u);
+  if (pass_uncertainty)
+    notify_invalidation(*item, InvalidationPassBegin | pass_uncertainty);
+  else if (const auto unsafe = static_cast<std::uint8_t>(target_mask(count) & ~after_begin.capture_targets))
+    notify_invalidation(*item, InvalidationPassBegin, unsafe);
   original(list, count, targets, depth, flags);
   track_active_pass(list);
 }
@@ -398,6 +432,7 @@ void end_impl(ID3D12GraphicsCommandList4* list, End original) noexcept {
   if (!value.active)
     value.invalid = true;
   value.active = false;
+  value.capture_targets = 0;
 }
 void STDMETHODCALLTYPE end(ID3D12GraphicsCommandList4* list) noexcept {
   end_impl(list, end_slot.forward<End>());
@@ -577,7 +612,7 @@ void track_active_pass(ID3D12GraphicsCommandList4* list) noexcept {
 }
 void begin_recording(standalone::List& item) noexcept {
   const auto current = epoch.load();
-  item.scope = {current, false, false, !enabled.load()};
+  item.scope = {current, false, false, !enabled.load(), 0};
 }
 void invalidate_recording(standalone::List& item, std::uint32_t reasons) noexcept {
   if (!item.alive.load(std::memory_order_acquire))
